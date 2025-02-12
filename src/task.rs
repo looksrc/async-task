@@ -13,17 +13,24 @@ use crate::runnable::ScheduleInfo;
 use crate::state::*;
 
 /// A spawned task.
+/// 任务句柄之一，用于等待任务结果。
 ///
 /// A [`Task`] can be awaited to retrieve the output of its future.
+/// [`Task`]可以等待获取任务future的输出。
 ///
 /// Dropping a [`Task`] cancels it, which means its future won't be polled again. To drop the
 /// [`Task`] handle without canceling it, use [`detach()`][`Task::detach()`] instead. To cancel a
 /// task gracefully and wait until it is fully destroyed, use the [`cancel()`][Task::cancel()]
 /// method.
+/// 任务默认在前台执行，即与Task生命周期共存，遗弃[`Task`]会取消任务future不会再被轮询。
+/// 使用 [`detach()`][`Task::detach()`]将任务放入后台执行，本质是泄露Task，使Task永远不会被遗弃。
 ///
 /// Note that canceling a task actually wakes it and reschedules one last time. Then, the executor
 /// can destroy the task by simply dropping its [`Runnable`][`super::Runnable`] or by invoking
 /// [`run()`][`super::Runnable::run()`].
+/// 取消任务时：
+/// - 1.实际上会唤醒任务最后一次调度它。
+/// - 2.然后，执行器通过[`run()`][`super::Runnable::run()`]消耗遗弃[`Runnable`][`super::Runnable`]
 ///
 /// # Examples
 ///
@@ -66,6 +73,7 @@ impl<T, M> std::panic::RefUnwindSafe for Task<T, M> {}
 
 impl<T, M> Task<T, M> {
     /// Detaches the task to let it keep running in the background.
+    /// 泄露Task使之不会再被遗弃，因此任务也不会随着Task的消亡而取消。
     ///
     /// # Examples
     ///
@@ -91,12 +99,15 @@ impl<T, M> Task<T, M> {
     }
 
     /// Cancels the task and waits for it to stop running.
+    /// 异步取消任务。
     ///
     /// Returns the task's output if it was completed just before it got canceled, or [`None`] if
     /// it didn't complete.
+    /// 如果任务完成则返回任务结果，如果任务未完成则返回None。
     ///
     /// While it's possible to simply drop the [`Task`] to cancel it, this is a cleaner way of
     /// canceling because it also waits for the task to stop running.
+    /// 最简单的取消方式是遗弃Task句柄，是更干净的取消方式。
     ///
     /// # Examples
     ///
@@ -131,12 +142,14 @@ impl<T, M> Task<T, M> {
     }
 
     /// Converts this task into a [`FallibleTask`].
+    /// 将任务句柄转为[`FallibleTask`]句柄。
     ///
     /// Like [`Task`], a fallible task will poll the task's output until it is
     /// completed or cancelled due to its [`Runnable`][`super::Runnable`] being
     /// dropped without being run. Resolves to the task's output when completed,
     /// or [`None`] if it didn't complete.
-    ///
+    /// 
+    /// 
     /// # Examples
     ///
     /// ```
@@ -180,6 +193,7 @@ impl<T, M> Task<T, M> {
     }
 
     /// Puts the task in canceled state.
+    /// 将任务设为取消状态。
     fn set_canceled(&mut self) {
         let ptr = self.ptr.as_ptr();
         let header = ptr as *const Header<M>;
@@ -187,13 +201,19 @@ impl<T, M> Task<T, M> {
         unsafe {
             let mut state = (*header).state.load(Ordering::Acquire);
 
+            // 利用乐观锁将任务状态标记为关闭和已调度。标记成功后：
+            // 1.如果任务标记为关闭之前不是调度或运行状态，则组后调度一次任务让执行器销毁它。
+            // 2.如果任务还有等待者，则唤醒等待者。
             loop {
                 // If the task has been completed or closed, it can't be canceled.
+                // 如果任务之前已完成或关闭，直接返回。
                 if state & (COMPLETED | CLOSED) != 0 {
                     break;
                 }
 
                 // If the task is not scheduled nor running, we'll need to schedule it.
+                // 如果任务未被调度或执行，则将状态设为调度和关闭，且任务引用计数曾一。
+                // 如果任务被调度或在执行，则将状态设为关闭。
                 let new = if state & (SCHEDULED | RUNNING) == 0 {
                     (state | SCHEDULED | CLOSED) + REFERENCE
                 } else {
@@ -210,6 +230,7 @@ impl<T, M> Task<T, M> {
                     Ok(_) => {
                         // If the task is not scheduled nor running, schedule it one more time so
                         // that its future gets dropped by the executor.
+                        // 
                         if state & (SCHEDULED | RUNNING) == 0 {
                             ((*header).vtable.schedule)(ptr, ScheduleInfo::new(false));
                         }
@@ -228,17 +249,21 @@ impl<T, M> Task<T, M> {
     }
 
     /// Puts the task in detached state.
+    /// 将任务转为分离状态。
     fn set_detached(&mut self) -> Option<Result<T, Panic>> {
         let ptr = self.ptr.as_ptr();
         let header = ptr as *const Header<M>;
 
         unsafe {
             // A place where the output will be stored in case it needs to be dropped.
+            // 存储输出。以防需要被遗弃。
             let mut output = None;
 
             // Optimistically assume the `Task` is being detached just after creating the task.
             // This is a common case so if the `Task` is datached, the overhead of it is only one
             // compare-exchange operation.
+            // 乐观的假设Task在创建后立即会被分离。
+            // 这是一种最常见的情况，因此Task一旦被分离，它的开销仅是一个比较交换操作。
             if let Err(mut state) = (*header).state.compare_exchange_weak(
                 SCHEDULED | TASK | REFERENCE,
                 SCHEDULED | REFERENCE,
@@ -248,8 +273,10 @@ impl<T, M> Task<T, M> {
                 loop {
                     // If the task has been completed but not yet closed, that means its output
                     // must be dropped.
+                    // 如果任务已经完成但未关闭，意味着输出需要被遗弃。
                     if state & COMPLETED != 0 && state & CLOSED == 0 {
                         // Mark the task as closed in order to grab its output.
+                        // 为任务状态添加关闭标志。
                         match (*header).state.compare_exchange_weak(
                             state,
                             state | CLOSED,
@@ -258,12 +285,14 @@ impl<T, M> Task<T, M> {
                         ) {
                             Ok(_) => {
                                 // Read the output.
+                                // 读取任务输出。
                                 output = Some(
                                     (((*header).vtable.get_output)(ptr) as *mut Result<T, Panic>)
                                         .read(),
                                 );
 
                                 // Update the state variable because we're continuing the loop.
+                                // 更新state变量继续循环。
                                 state |= CLOSED;
                             }
                             Err(s) => state = s,
@@ -309,8 +338,10 @@ impl<T, M> Task<T, M> {
     }
 
     /// Polls the task to retrieve its output.
+    /// 轮询Task获取任务输出。
     ///
     /// Returns `Some` if the task has completed or `None` if it was closed.
+    /// 任务如果完成了返回Some，关闭返回None。
     ///
     /// A task becomes closed in the following cases:
     ///
@@ -318,6 +349,14 @@ impl<T, M> Task<T, M> {
     /// 2. Its output gets awaited by the `Task`.
     /// 3. It panics while polling the future.
     /// 4. It is completed and the `Task` gets dropped.
+    /// 
+    /// 任务在以下情况状态变为关闭：
+    /// 
+    /// - 被取消：`Runnable::drop()`, `Task::drop()`, or `Task::cancel()`。
+    /// - 输出被`Task`读取。
+    /// - 轮询future时产生恐慌
+    /// - 任务完成，`Task`被遗弃。
+    /// 
     fn poll_task(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
         let ptr = self.ptr.as_ptr();
         let header = ptr as *const Header<M>;
@@ -327,9 +366,11 @@ impl<T, M> Task<T, M> {
 
             loop {
                 // If the task has been closed, notify the awaiter and return `None`.
+                // 如果任务已经关闭，通知等待者并返回None。
                 if state & CLOSED != 0 {
                     // If the task is scheduled or running, we need to wait until its future is
                     // dropped.
+                    // 如果任务状态为被调度或正在运行，重新注册唤醒器。
                     if state & (SCHEDULED | RUNNING) != 0 {
                         // Replace the waker with one associated with the current task.
                         (*header).register(cx.waker());
@@ -352,6 +393,7 @@ impl<T, M> Task<T, M> {
                 }
 
                 // If the task is not completed, register the current task.
+                // 如果任务未完成，则注册当前任务唤醒器。
                 if state & COMPLETED == 0 {
                     // Replace the waker with one associated with the current task.
                     (*header).register(cx.waker());
@@ -372,6 +414,7 @@ impl<T, M> Task<T, M> {
                 }
 
                 // Since the task is now completed, mark it as closed in order to grab its output.
+                // 如果任务现在完成了，将任务关闭，读取并返回任务输出。
                 match (*header).state.compare_exchange(
                     state,
                     state | CLOSED,

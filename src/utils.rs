@@ -1,9 +1,19 @@
 use core::alloc::Layout as StdLayout;
 use core::mem;
 
+#[cfg(test)]
+mod test {
+    #[test]
+    fn test_abort() {
+        super::abort();
+    }
+}
+
 /// Aborts the process.
+/// 终止进程。
 ///
 /// To abort, this function simply panics while panicking.
+/// 抛出两个恐慌：1.非遗弃方法中的恐慌 2.遗弃方法中的恐慌
 pub(crate) fn abort() -> ! {
     struct Panic;
 
@@ -18,8 +28,10 @@ pub(crate) fn abort() -> ! {
 }
 
 /// Calls a function and aborts if it panics.
+/// 执行一个函数时如果发生恐慌，则终止程序。
 ///
 /// This is useful in unsafe code where we can't recover from panics.
+/// 用在不安全代码中，无法恢复恐慌。
 #[inline]
 pub(crate) fn abort_on_panic<T>(f: impl FnOnce() -> T) -> T {
     struct Bomb;
@@ -31,13 +43,14 @@ pub(crate) fn abort_on_panic<T>(f: impl FnOnce() -> T) -> T {
     }
 
     let bomb = Bomb;
-    let t = f();
+    let t = f(); // 如果f()产生恐慌，则不会执行下面的forget，直接跳到bomb的drop触发终止进程。
     mem::forget(bomb);
     t
 }
 
 /// A version of `alloc::alloc::Layout` that can be used in the const
 /// position.
+/// 可在常上下文中使用的`alloc::alloc::Layout`版本。
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Layout {
     size: usize,
