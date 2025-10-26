@@ -13,21 +13,25 @@ use crate::runnable::ScheduleInfo;
 use crate::state::*;
 
 /// A spawned task.
+/// 
 /// 任务句柄之一，用于等待任务结果。
 ///
 /// A [`Task`] can be awaited to retrieve the output of its future.
+/// 
 /// [`Task`]可以等待获取任务future的输出。
 ///
 /// Dropping a [`Task`] cancels it, which means its future won't be polled again. To drop the
 /// [`Task`] handle without canceling it, use [`detach()`][`Task::detach()`] instead. To cancel a
 /// task gracefully and wait until it is fully destroyed, use the [`cancel()`][Task::cancel()]
 /// method.
+/// 
 /// 任务默认在前台执行，即与Task生命周期共存，遗弃[`Task`]会取消任务future不会再被轮询。
 /// 使用 [`detach()`][`Task::detach()`]将任务放入后台执行，本质是泄露Task，使Task永远不会被遗弃。
 ///
 /// Note that canceling a task actually wakes it and reschedules one last time. Then, the executor
 /// can destroy the task by simply dropping its [`Runnable`][`super::Runnable`] or by invoking
 /// [`run()`][`super::Runnable::run()`].
+/// 
 /// 取消任务时：
 /// - 1.实际上会唤醒任务最后一次调度它。
 /// - 2.然后，执行器通过[`run()`][`super::Runnable::run()`]消耗遗弃[`Runnable`][`super::Runnable`]
@@ -73,7 +77,8 @@ impl<T, M> std::panic::RefUnwindSafe for Task<T, M> {}
 
 impl<T, M> Task<T, M> {
     /// Detaches the task to let it keep running in the background.
-    /// 泄露Task使之不会再被遗弃，因此任务也不会随着Task的消亡而取消。
+    /// 
+    /// 泄露Task使之不会执行遗弃逻辑，因此任务也不会因Task的遗弃而取消。
     ///
     /// # Examples
     ///
@@ -99,14 +104,17 @@ impl<T, M> Task<T, M> {
     }
 
     /// Cancels the task and waits for it to stop running.
+    /// 
     /// 异步取消任务。
     ///
     /// Returns the task's output if it was completed just before it got canceled, or [`None`] if
     /// it didn't complete.
+    /// 
     /// 如果任务完成则返回任务结果，如果任务未完成则返回None。
     ///
     /// While it's possible to simply drop the [`Task`] to cancel it, this is a cleaner way of
     /// canceling because it also waits for the task to stop running.
+    /// 
     /// 最简单的取消方式是遗弃Task句柄，是更干净的取消方式。
     ///
     /// # Examples
@@ -366,7 +374,9 @@ impl<T, M> Task<T, M> {
 
             loop {
                 // If the task has been closed, notify the awaiter and return `None`.
-                // 如果任务已经关闭，通知等待者并返回None。
+                // 任务已经标记为关闭：
+                // - 任务还在飞行中，则更新Waker，返回Pending。
+                // - 不在飞行中，通知等待者，并返回None。
                 if state & CLOSED != 0 {
                     // If the task is scheduled or running, we need to wait until its future is
                     // dropped.
@@ -515,6 +525,13 @@ impl<T, M: fmt::Debug> fmt::Debug for Task<T, M> {
 ///
 /// This can be useful to avoid the panic produced when polling the `Task`
 /// future if the executor dropped its `Runnable`.
+/// 
+/// 孵化一个可失败任务。
+/// 
+/// 类似于[`Task`]，区别是输出类型是`Option<T>`，可收到成功执行或失败执行的结果。
+/// 失败执行的原因为，[`Runnable`][`super::Runnable`]句柄还没有执行就被执行器遗弃了。
+/// 
+/// 此类型用于避免因`Runnable`被执行器遗弃后，再轮询`Task`时产生恐慌。
 #[must_use = "tasks get canceled when dropped, use `.detach()` to run them in the background"]
 pub struct FallibleTask<T, M = ()> {
     task: Task<T, M>,

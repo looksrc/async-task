@@ -24,7 +24,7 @@ pub(crate) struct Header<M> {
     /// Contains flags representing the current state and the reference count.
     /// 构成：
     /// - 最低字节：存储任务状态标记位
-    /// - 高位字节：存储任务内存块的引用计数，因此引用计数每变化1，state值变化256(对应REFERENCE的值)
+    /// - 高位字节：存储任务内存块的引用计数，引用计数每变化1，state值变化256(对应REFERENCE的值)
     pub(crate) state: AtomicUsize,
 
     /// The task that is blocked on the `Task` handle.
@@ -39,7 +39,7 @@ pub(crate) struct Header<M> {
     ///
     /// In addition to the actual waker virtual table, it also contains pointers to several other
     /// methods necessary for bookkeeping the heap-allocated task.
-    /// 除了唤醒器携带的虚表以外，还需要一些通过任务指针操纵任务内容的虚表，
+    /// 除了唤醒器携带的虚表以外，还需要一些通过任务虚表，
     pub(crate) vtable: &'static TaskVTable,
 
     /// Metadata associated with the task.
@@ -60,7 +60,17 @@ impl<M> Header<M> {
     /// 唤醒Task::await。
     ///
     /// If the awaiter is the same as the current waker, it will not be notified.
-    /// 如果传入的唤醒器与当前唤醒器相同则不执行通知。。???
+    /// 
+    /// current：
+    /// - 是在Task::poll中调用notify()时从轮询上下文cx中取出的唤醒器。
+    /// 
+    /// 当current=None：
+    /// - 利用任务内置的Waker执行Task唤醒，这里时纯粹的唤醒，没其它意思。
+    /// 
+    /// 当current!=None：
+    /// - 作用：校验当前任务内置的唤醒器是否指向其它Task句柄的。
+    /// - 如果current与任务内置唤醒器相同时，什么都不干。
+    /// - 如果current与任务内置唤醒器不同时，说明还有其它Task副本在等待，将内置的唤醒。
     #[inline]
     pub(crate) fn notify(&self, current: Option<&Waker>) {
         if let Some(w) = self.take(current) {
@@ -69,10 +79,17 @@ impl<M> Header<M> {
     }
 
     /// Takes the awaiter blocked on this task.
-    /// 获取Task::await的唤醒器。
+    /// 获取Task::await的内置唤醒器。
     ///
     /// If there is no awaiter or if it is the same as the current waker, returns `None`.
-    /// 如果没有Task::await阻塞，或与当前的唤醒器相同，则返回None。
+    /// 
+    /// current=None：
+    /// - 直接返回任务内置唤醒器
+    /// 
+    /// current!=None：
+    /// - 作用：校验内置唤醒器和提供的唤醒器是否相同，如果不同则返回内置的。
+    /// - 如果current与内置唤醒器相同，则丢弃内置唤醒器。返回None。
+    /// - 如果current与内置唤醒器不同，则返回内置唤醒器。
     #[inline]
     pub(crate) fn take(&self, current: Option<&Waker>) -> Option<Waker> {
         // Set the bit indicating that the task is notifying its awaiter.
@@ -118,7 +135,7 @@ impl<M> Header<M> {
         // 读取状态值。
         let mut state = self.state.fetch_or(0, Ordering::Acquire);
 
-        // 唤醒器插入前：
+        // ① 唤醒器插入前：
         // 1.如果当前任务状态为通知，则直接执行唤醒，不插入唤醒器了。
         // 2.否则，利用乐观锁更改任务状态为REGISTERING，与其它线程的注册操作互斥。
         loop {
@@ -152,7 +169,7 @@ impl<M> Header<M> {
         }
 
         // Put the waker into the awaiter field.
-        // 向任务中插入唤醒器。
+        // ② 向任务中插入唤醒器。
         unsafe {
             abort_on_panic(|| (*self.awaiter.get()) = Some(waker.clone()));
         }
@@ -162,7 +179,7 @@ impl<M> Header<M> {
         // 如果还没注册完成就收到了通知，则用waker临时存储唤醒器。
         let mut waker = None;
 
-        // 唤醒器插入后：
+        // ③ 唤醒器插入后：
         // - 1.依据最新的NOTIFY状态，判定是否取出唤醒器，并写入最终确定的STATE值。
         // - 2.如果STATE变化后碰巧NOTIFY了，则唤醒器会被取出，程序末尾执行唤醒操作。
         // - 3.如果STATE没变化或者变化后没有NOTIFY，则更新完STATE状态后就返回。

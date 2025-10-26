@@ -23,7 +23,7 @@ mod sealed {
 }
 
 /// A builder that creates a new task.
-/// 新任务创建器。
+/// 任务创建器。
 #[derive(Debug)]
 pub struct Builder<M> {
     /// The metadata associated with the task.
@@ -48,6 +48,12 @@ impl<M: Default> Default for Builder<M> {
 /// of the crate itself, different from [`Runnable`]'s metadata, which is
 /// managed by the caller.
 ///
+/// 传给调度函数的额外信息。可依据此额外信息控制调度逻辑。
+///
+/// 信息来自：
+/// - 此结构体的数据来源，直接来自包自身的实现。
+/// - 类似的任务[`Runnable`]的元数据，来自调用者。
+///
 /// # Examples
 ///
 /// ```
@@ -55,11 +61,13 @@ impl<M: Default> Default for Builder<M> {
 /// use std::sync::{Arc, Mutex};
 ///
 /// // The future inside the task.
+/// // 任务内future。
 /// let future = async {
 ///     println!("Hello, world!");
 /// };
 ///
 /// // If the task gets woken up while running, it will be sent into this channel.
+/// // 如果调度器传入了额外信息设置了woken_while_running，则任务将被发送到通道，
 /// let (s, r) = flume::unbounded();
 /// // Otherwise, it will be placed into this slot.
 /// let lifo_slot = Arc::new(Mutex::new(None));
@@ -75,8 +83,10 @@ impl<M: Default> Default for Builder<M> {
 /// };
 ///
 /// // Create the actual scheduler to be spawned with some future.
+/// // 创建可传入额外信息的调度器。
 /// let scheduler = WithInfo(schedule);
 /// // Create a task with the future and the scheduler.
+/// // 创建任务。
 /// let (runnable, task) = async_task::spawn(future, scheduler);
 /// ```
 #[derive(Debug, Copy, Clone)]
@@ -98,6 +108,12 @@ impl ScheduleInfo {
 }
 
 /// The trait for scheduling functions.
+///
+/// 调度器接口，提供调度函数，接收任务对象和额外调度信息。
+///
+/// 两个预定义实现：
+/// - F: Fn(Runnable<M>)，额外信息忽略。
+/// - WithInfo<F>(F)，且F: Fn(Runnable<M>, ScheduleInfo)，不忽略额外信息。
 pub trait Schedule<M = ()>: sealed::Sealed<M> {
     /// The actual scheduling procedure.
     fn schedule(&self, runnable: Runnable<M>, info: ScheduleInfo);
@@ -206,6 +222,9 @@ impl Builder<()> {
     /// method allows the user to attach arbitrary metadata to a task that is available through
     /// the [`Runnable`] or the [`Task`].
     ///
+    /// 在执行任务或处理任务时，可以依据任务元数据添加一些额外的逻辑。比如可以给任务关联一个名字或优先级队列中的优先级。
+    /// 此方法可以让用户为任务附加任意的元数据，可被任务句柄访问，如[`Runnable`]或[`Task`]。
+    ///
     /// # Examples
     ///
     /// This example creates an executor that associates a "priority" number with each task, and
@@ -252,6 +271,8 @@ impl Builder<()> {
     /// };
     ///
     /// // Spawn a few tasks with different priorities.
+    /// // 孵化并调度一系列任务
+    /// // 每个任务设置一个元数据代表优先级，任务的逻辑是返回自身的优先级数据。
     /// let spawn_task = move |priority| {
     ///     let (runnable, task) = Builder::new().metadata(priority).spawn(
     ///         move |_| async move { priority },
@@ -266,6 +287,8 @@ impl Builder<()> {
     /// let t3 = spawn_task(3);
     ///
     /// // Run the tasks in order of priority.
+    /// // 执行器
+    /// // 每获取到一个任务，就将任务元数据读出存储一个任务队列中，即执行器自己看到的所有元数据。
     /// let mut metadata_seen = vec![];
     /// while let Some(TaskWrapper(runnable)) = EXECUTOR.lock().unwrap().pop() {
     ///     metadata_seen.push(*runnable.metadata());
@@ -289,7 +312,9 @@ impl Builder<()> {
 
 impl<M> Builder<M> {
     /// Propagates panics that occur in the task.
-    /// 设置任务的恐慌传播策略。
+    /// 设置任务的恐慌捕获策略。
+    /// - true：捕获。捕获并转化为Error传播给上层。比如被轮询时返回Poll::Ready(e)。
+    /// - false：不捕获。恐慌不做捕获直接抛出，调用[`Runnable::run`]的人会直接看到恐慌。
     ///
     /// When this is `true`, panics that occur in the task will be propagated to the caller of
     /// the [`Task`]. When this is false, no special action is taken when a panic occurs in the
@@ -338,7 +363,9 @@ impl<M> Builder<M> {
     }
 
     /// Creates a new task.
-    /// 执行任务创建。返回两种任务句柄：Runnable和Task。
+    /// 创建任务。返回两种任务句柄：
+    /// - Runnable：任务执行句柄。执行任务时(run)时，Runnable会消失，直到任务被Waker唤醒时出现以作为被调度目标。
+    /// - Task：任务等待句柄。
     ///
     /// The returned [`Runnable`] is used to poll the `future`, and the [`Task`] is used to await its
     /// output.
@@ -382,12 +409,18 @@ impl<M> Builder<M> {
     }
 
     /// Creates a new thread-local task.
-    /// 执行线程本地任务创建。
     ///
     /// This function is same as [`spawn()`], except it does not require [`Send`] on `future`. If the
     /// [`Runnable`] is used or dropped on another thread, a panic will occur.
     ///
     /// This function is only available when the `std` feature for this crate is enabled.
+    ///
+    /// 创建一个只局限在当前线程的任务实例。
+    ///
+    /// 此方法与[`spawn()`]区别是：本方法可以传入非[`Send`]的future类型。
+    /// 因此，创建出的[`Runnable`]也不能在其它线程使用或遗弃，否则发生恐慌。
+    ///
+    /// 此函数仅在开启了`std`特性时可用。
     ///
     /// # Examples
     ///
@@ -471,7 +504,8 @@ impl<M> Builder<M> {
         }
 
         // Wrap the future into one that checks which thread it's on.
-        // 新设Future获取函数，最终获取的Future会包含了线程信息。即Checked。
+        // 新设Future获取函数，将线程信息(位于元数据中)和原始future包装为新future。即Checked。
+        // 其中的线程信息，用于在执行任务判定创建任务的线程与执行任务的线程(当前线程)是否相同。
         let future = move |meta| {
             let future = future(meta);
 
@@ -485,10 +519,14 @@ impl<M> Builder<M> {
     }
 
     /// Creates a new task without [`Send`], [`Sync`], and `'static` bounds.
-    /// 创建任务的通用方法，不强制要求[`Send`], [`Sync`], `'static`三种约束。
     ///
     /// This function is same as [`spawn()`], except it does not require [`Send`], [`Sync`], and
     /// `'static` on `future` and `schedule`.
+    ///
+    /// 创建任务实例的通用方法，不强制要求[`Send`], [`Sync`], `'static`三种约束。
+    ///
+    /// 通常为特定场景包装此方法，并在包装方法上设置传入信息的约束。
+    ///
     /// 功能与[`spawn()`]相同，但不强制要求`future`,`schedule`两个参数具有[`Send`], [`Sync`], `'static`约束。
     ///
     /// # Safety
@@ -530,8 +568,8 @@ impl<M> Builder<M> {
         M: 'a,
     {
         // Allocate large futures on the heap.
-        // 如果函数返回的Future尺寸大于2048则重写Future生成函数将Future单独存堆，任务内存块只存其指针。
-        // 否则，将Future值直接内嵌在任务对应的内存块中。
+        // 如果Future尺寸大于2048则将Future单独装盒存堆，任务内存块只存其智能指针。
+        // 否则，将整个Future内容直接内嵌在任务内存块中。
         let ptr = if mem::size_of::<Fut>() >= 2048 {
             let future = |meta| {
                 let future = future(meta);
@@ -543,7 +581,7 @@ impl<M> Builder<M> {
             RawTask::<Fut, Fut::Output, S, M>::allocate(future, schedule, self)
         };
 
-        // 创建两个句柄
+        // 创建任务对应的两种句柄，Runnable执行句柄，Task等待结果句柄。
         let runnable = Runnable::from_raw(ptr);
         let task = Task {
             ptr,
@@ -568,6 +606,8 @@ impl<M> Builder<M> {
 ///
 /// If you need to spawn a future that does not implement [`Send`] or isn't `'static`, consider
 /// using [`spawn_local()`] or [`spawn_unchecked()`] instead.
+///
+/// 创建一个任务实例，限制future必须实现Send。
 ///
 /// # Examples
 ///
@@ -595,10 +635,16 @@ where
 
 /// Creates a new thread-local task.
 ///
+/// 创建一个线程本地的任务。
+///
+/// 与spawn区别是，所接受的future没有实现Send，不能在线程间安全移动，紧局限在本线程。
+///
 /// This function is same as [`spawn()`], except it does not require [`Send`] on `future`. If the
 /// [`Runnable`] is used or dropped on another thread, a panic will occur.
 ///
 /// This function is only available when the `std` feature for this crate is enabled.
+///
+/// 创建一个任务实例，限制future只能在当前线程流转，因此也限制了Runnable。
 ///
 /// # Examples
 ///
@@ -636,6 +682,9 @@ where
 }
 
 /// Creates a new task without [`Send`], [`Sync`], and `'static` bounds.
+///
+/// 对无任何线程安全限制的Future创建任务。
+/// 只负责无脑创建任务，安全性由它的上层调用者负责。比如spawn，spawn_local。
 ///
 /// This function is same as [`spawn()`], except it does not require [`Send`], [`Sync`], and
 /// `'static` on `future` and `schedule`.
@@ -743,10 +792,14 @@ impl<M> Runnable<M> {
     }
 
     /// Schedules the task.
-    /// 消耗自己，重新调度一次自己，不执行Drop。
+    /// 任务调度：调度自身一次。任务所有权流转给了调度函数。
+    ///
+    /// 注意：
+    /// - 调度函数吞没了Runnable的所有权，但是内部没有明显的所有权转移行为。
+    /// - 因为任务被调度时会重建Runnable。
+    /// - 最终：相当于一次不是由所有权系统的控制的所有权转移。(Runnable -> ptr -> Runnable)
     ///
     /// This is a convenience method that passes the [`Runnable`] to the schedule function.
-    /// 是将Runnable传给调度器的快捷方法。
     ///
     /// # Examples
     ///
@@ -774,7 +827,7 @@ impl<M> Runnable<M> {
     }
 
     /// Runs the task by polling its future.
-    /// 消耗自己，轮询一次任务，不执行Drop。
+    /// 任务执行：执行任务一次。任务所有权流转给了执行函数。
     ///
     /// Returns `true` if the task was woken while running, in which case the [`Runnable`] gets
     /// rescheduled at the end of this method invocation. Otherwise, returns `false` and the
@@ -782,8 +835,14 @@ impl<M> Runnable<M> {
     /// The return value is just a hint: `true` usually indicates that the task has yielded, i.e.
     /// it woke itself and then gave the control back to the executor.
     ///
+    /// 如果开启了执行时唤醒，则返回true。如果任务执行期间收到了唤醒通知，则在函数结束后立即调度一次任务。
+    /// 否则返回false。任务执行后则被清除直到下次被唤醒。
+    ///
+    ///
     /// If the [`Task`] handle was dropped or if [`cancel()`][`Task::cancel()`] was called, then
     /// this method simply destroys the task.
+    ///
+    /// 如果任务已被遗弃或取消，则此函数执行时会销毁任务。
     ///
     /// If the polled future panics, this method propagates the panic, and awaiting the [`Task`]
     /// after that will also result in a panic.
@@ -811,7 +870,7 @@ impl<M> Runnable<M> {
     }
 
     /// Returns a waker associated with this task.
-    /// 获取任务关联的唤醒器的副本。
+    /// 获取任务的唤醒器副本。
     ///
     /// # Examples
     ///
@@ -849,7 +908,7 @@ impl<M> Runnable<M> {
     }
 
     /// Converts this task into a raw pointer.
-    /// 将Runnable转为任务内存块指针，不执行drop。
+    /// 吞没所有权，获得指针。(从所有权系统泄漏)
     ///
     /// To avoid a memory leak the pointer must be converted back to a Runnable using [`Runnable<M>::from_raw`][from_raw].
     ///
@@ -880,7 +939,7 @@ impl<M> Runnable<M> {
     }
 
     /// Converts a raw pointer into a Runnable.
-    /// 直接从任务内存块指针创建Runnable实例。
+    /// 还原所有权，从指针中。(回归所有权系统)
     ///
     /// # Safety
     ///
@@ -930,7 +989,8 @@ impl<M> Drop for Runnable<M> {
         unsafe {
             let mut state = header.state.load(Ordering::Acquire);
 
-            // 通过乐观锁将任务标记为关闭。
+            // 通过乐观锁将任务标记为已关闭。
+            // 如果任务状态为已关闭或已完成，则标记成功。
             loop {
                 // If the task has been completed or closed, it can't be canceled.
                 if state & (COMPLETED | CLOSED) != 0 {
@@ -964,7 +1024,7 @@ impl<M> Drop for Runnable<M> {
             }
 
             // Drop the task reference.
-            // 更新任务的引用计数。
+            // 更新任务的引用计数。即少了一个Runnable句柄。
             (header.vtable.drop_ref)(ptr);
         }
     }

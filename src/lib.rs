@@ -4,7 +4,15 @@
 //! state attached to it. The state indicates whether the future is ready for polling, waiting to
 //! be woken up, or completed. Such a stateful future is called a *task*.
 //!
+//! 构建执行器所需的任务抽象。
+//!
+//! 要想在执行器上孵化一个future，首先需要在堆上申请内存并将一些状态附加给它。
+//! 状态指示了future是否准备好轮询、等待唤醒、完成。
+//! 这样的有状态的future，称为"任务"。
+//!
 //! All executors have a queue that holds scheduled tasks:
+//!
+//! 所有执行器都有一个持有已调度任务的队列：
 //!
 //! ```
 //! let (sender, receiver) = flume::unbounded();
@@ -21,6 +29,8 @@
 //!
 //! A task is created using either [`spawn()`], [`spawn_local()`], or [`spawn_unchecked()`] which
 //! return a [`Runnable`] and a [`Task`]:
+//!
+//! 任务通常通过[`spawn()`], [`spawn_local()`], [`spawn_unchecked()`]，创建并返回[`Runnable`] and a [`Task`]：
 //!
 //! ```
 //! # let (sender, receiver) = flume::unbounded();
@@ -41,7 +51,11 @@
 //! The [`Runnable`] is used to poll the task's future, and the [`Task`] is used to await its
 //! output.
 //!
+//! [`Runnable`]用于轮询任务future，[`Task`]用于等待输出。
+//!
 //! Finally, we need a loop that takes scheduled tasks from the queue and runs them:
+//!
+//! 最终，我们需要一个循环，从队列获取已调度任务并执行他们。
 //!
 //! ```no_run
 //! # let (sender, receiver) = flume::unbounded();
@@ -66,6 +80,9 @@
 //! Method [`run()`][`Runnable::run()`] polls the task's future once. Then, the [`Runnable`]
 //! vanishes and only reappears when its [`Waker`][`core::task::Waker`] wakes the task, thus
 //! scheduling it to be run again.
+//!
+//! 方法[`run()`][`Runnable::run()`]轮询一次任务future。
+//! 然后[`Runnable`]被清除，并在[`Waker`][`core::task::Waker`]唤醒任务时再次出现，因此调度它再次执行。
 
 #![no_std]
 #![warn(missing_docs, missing_debug_implementations, rust_2018_idioms)]
@@ -84,6 +101,10 @@ extern crate std;
 
 /// We can't use `?` in const contexts yet, so this macro acts
 /// as a workaround.
+///
+/// 短路，同`?`，区别是可以用在常上下文中。
+///
+/// 短路效果：直接返回
 macro_rules! leap {
     ($x: expr) => {{
         match ($x) {
@@ -93,6 +114,9 @@ macro_rules! leap {
     }};
 }
 
+/// 短路，同`?`，区别是可以用在常上下文中。
+///
+/// 短路效果：抛出恐慌
 macro_rules! leap_unwrap {
     ($x: expr) => {{
         match ($x) {

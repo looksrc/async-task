@@ -11,7 +11,7 @@
 pub(crate) const SCHEDULED: usize = 1 << 0;
 
 /// Set if the task is running.
-/// 设置任务是否正在被轮询。
+/// 设置任务是否正在轮询中(poll中)。
 ///
 /// A task is in running state while its future is being polled.
 ///
@@ -74,14 +74,14 @@ pub(crate) const TASK: usize = 1 << 4;
 pub(crate) const AWAITER: usize = 1 << 5;
 
 /// Set if an awaiter is being registered.
-/// 标记是否有等待着注册了唤醒器。
+/// 标记是否正在注册唤醒器的逻辑中。用于并发互斥。
 ///
 /// This flag is set when `Task` is polled and we are registering a new awaiter.
 /// 当`Task`首次被轮询时会注册唤醒器。
 pub(crate) const REGISTERING: usize = 1 << 6;
 
 /// Set if the awaiter is being notified.
-/// 标记是否正在处理对等待者的唤醒操作。可以当作互斥锁来用避免多线程同时处理唤醒器。
+/// 标记是否正在唤醒逻辑中。用于并发互斥。
 ///
 /// This flag is set when notifying the awaiter. If an awaiter is concurrently registered and
 /// notified, whichever side came first will take over the reposibility of resolving the race.

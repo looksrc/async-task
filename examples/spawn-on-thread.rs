@@ -9,6 +9,11 @@ use smol::future;
 
 /// Spawns a future on a new dedicated thread.
 ///
+/// 孵化并调度一个任务
+/// - 执行器：独立线程。
+/// - 调度器：任务通过通道发送给独立线程执行器。
+/// - future：包装为新的future，添加了任务完结时回收调度器管道发送端的逻辑。
+///
 /// The returned task can be used to await the output of the future.
 fn spawn_on_thread<F, T>(future: F) -> Task<T>
 where

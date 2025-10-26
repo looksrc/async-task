@@ -36,7 +36,7 @@ pub(crate) struct TaskVTable {
     pub(crate) drop_future: unsafe fn(*const ()),
 
     /// Returns a pointer to the output stored after completion.
-    /// 返回指向任务完成后存储输出结果的指针。
+    /// 返回指向任务输出结果的指针。
     pub(crate) get_output: unsafe fn(*const ()) -> *const (),
 
     /// Drops the task reference (`Runnable` or `Waker`).
@@ -52,7 +52,7 @@ pub(crate) struct TaskVTable {
     pub(crate) run: unsafe fn(*const ()) -> bool,
 
     /// Creates a new waker associated with the task.
-    /// 新创建一个与任务关联的唤醒器。
+    /// 新创建一个与任务关联的唤醒器。(唤醒器又引用了任务)
     pub(crate) clone_waker: unsafe fn(ptr: *const ()) -> RawWaker,
 
     /// The memory layout of the task. This information enables
@@ -519,11 +519,15 @@ where
     }
 
     /// Cleans up task's resources and deallocates it.
-    /// 清理并回收任务资源。
-    ///
+    /// 
     /// The schedule function will be dropped, and the task will then get deallocated.
     /// The task must be closed before this function is called.
-    /// 遗弃调度函数值，遗弃任务头Header，回收RawTask内存。
+    /// 
+    /// 清理并回收任务资源。
+    /// 
+    /// - 遗弃调度函数值
+    /// - 遗弃任务头Header
+    /// - 回收RawTask内存。
     #[inline]
     unsafe fn destroy(ptr: *const ()) {
         let raw = Self::from_ptr(ptr);
@@ -543,13 +547,15 @@ where
     }
 
     /// Runs a task.
-    /// 运行一个任务。
     ///
     /// If polling its future panics, the task will be closed and the panic will be propagated into
     /// the caller.
+    /// 
+    /// 运行一个任务。
+    /// 
     /// 轮询任务的Future时如果产生恐慌，任务会被关闭并将恐慌传递给调用者。
     unsafe fn run(ptr: *const ()) -> bool {
-        // 还原任务类型
+        // 复原任务实例
         let raw = Self::from_ptr(ptr);
 
         // Create a context from the raw task pointer and the vtable inside the its header.
@@ -557,24 +563,26 @@ where
         let waker = ManuallyDrop::new(Waker::from_raw(RawWaker::new(ptr, &Self::RAW_WAKER_VTABLE)));
         let cx = &mut Context::from_waker(&waker);
 
+        // 加载任务状态值。
         let mut state = (*raw.header).state.load(Ordering::Acquire);
 
         // Update the task's state before polling its future.
-        // 轮询Future之前更新任务状态。
+        // ① 轮询Future之前初始化任务状态。
+        // - 如果任务已关闭，直接清理并返回.
+        // - 如果任务未关闭，标记为未调度、运行中。
         loop {
             // If the task has already been closed, drop the task reference and return.
-            // 如果任务已关闭，遗弃任务引用并返回。
             if state & CLOSED != 0 {
                 // Drop the future.
                 // 遗弃Future。
                 Self::drop_future(ptr);
 
                 // Mark the task as unscheduled.
-                // 任务状态标记为未调度。
+                // 标记为未调度。
                 let state = (*raw.header).state.fetch_and(!SCHEDULED, Ordering::AcqRel);
 
                 // Take the awaiter out.
-                // 读取任务等待者。
+                // 取出任务等待者。
                 let mut awaiter = None;
                 if state & AWAITER != 0 {
                     awaiter = (*raw.header).take(None);
@@ -585,7 +593,7 @@ where
                 Self::drop_ref(ptr);
 
                 // Notify the awaiter that the future has been dropped.
-                // 通知任务等待者Future已经被遗弃了。即唤醒Task::await()。
+                // 唤醒Task::await()。
                 if let Some(w) = awaiter {
                     abort_on_panic(|| w.wake());
                 }
@@ -593,8 +601,6 @@ where
             }
 
             // Mark the task as unscheduled and running.
-            // 如果任务状态在当前代码处理期间未被其他人改过，则将任务标记为未被调度、正在运行。
-            // 如果状态发生了变化，则更新状态后，重新处理。(乐观锁)
             match (*raw.header).state.compare_exchange_weak(
                 state,
                 (state & !SCHEDULED) | RUNNING,
@@ -639,12 +645,12 @@ where
             }
         };
 
-        // 如果Future轮询时没有恐慌产生，则资源走正常遗弃流程，不要资源守卫了。
+        // 走到这一步说明没有恐慌，遗忘守卫，避免二次释放。
         mem::forget(guard);
 
         // 处理轮询结果
-        // Poll::Ready：复用任务中Future的内存位置，写入Future执行结果，并唤醒Task::await()。
-        // Poll::Pending：
+        // - Poll::Ready：复用任务中Future的内存位置，写入Future执行结果，并唤醒Task::await()。
+        // - Poll::Pending：
         match poll {
             Poll::Ready(out) => {
                 // Replace the future with its output.
@@ -654,8 +660,8 @@ where
                 // The task is now completed.
                 loop {
                     // If the `Task` is dropped, we'll need to close it and drop the output.
-                    // 如果有`Task`句柄存活，标记未完成状态。
-                    // 如果没有`Task`句柄存活，标记为完成、关闭状态。
+                    // 如果没有`Task`句柄存活，标记为完成、关闭。
+                    // 如果有`Task`句柄存活，标记为完成。
                     let new = if state & TASK == 0 {
                         (state & !RUNNING & !SCHEDULED) | COMPLETED | CLOSED
                     } else {
@@ -663,7 +669,9 @@ where
                     };
 
                     // Mark the task as not running and completed.
-                    // 用乐观锁将任务状态修改为不在运行、已完成。
+                    // 乐观修改任务状态
+                    // - 如果有的话，唤醒Task::await。
+                    // - 如果没有，直接销毁任务输出，
                     match (*raw.header).state.compare_exchange_weak(
                         state,
                         new,
@@ -687,7 +695,7 @@ where
                             }
 
                             // Drop the task reference.
-                            // 唤醒器取出后，任务的引用计数需要减一。
+                            // 唤醒器消耗后，任务的引用计数需要减一。
                             Self::drop_ref(ptr);
 
                             // Notify the awaiter that the future has been dropped.
@@ -709,7 +717,8 @@ where
                 loop {
                     // If the task was closed while running, we'll need to unschedule in case it
                     // was woken up and then destroy it.
-                    // 如果任务在运行时关闭了，则移除调度防止其被唤醒，然后销毁它。
+                    // 如果任务在运行时关闭了，标记为未调度、未运行。
+                    // 否则，标记为未运行。
                     let new = if state & CLOSED != 0 {
                         state & !RUNNING & !SCHEDULED
                     } else {
